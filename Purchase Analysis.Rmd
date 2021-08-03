@@ -1,0 +1,239 @@
+---
+title: "Purchase Analysis"
+author: "Lisa Li"
+date: "1/27/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+rm(list=ls())
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r library all the files}
+library(RPostgreSQL)
+library(dplyr)
+library(dbplyr)
+library(data.table)
+library(lubridate)
+library(reshape2)
+library(stringr)
+library("readxl")
+library(writexl)
+library(openxlsx)
+library(tidyverse)
+library(odbc)
+```
+
+```{r current inventory report reading}
+con.microsoft.sql <- DBI::dbConnect(odbc::odbc(),
+                      Driver   = "SQL Server",
+                      Server   = "52.86.56.66",
+                      Database = "BookXCenterProduction",
+                      UID      = "LisaLi",
+                      PWD      = "t4vUByNaANWqszXP",
+                      Port     =  1433)
+
+inventory_report_sql <- dbSendQuery(con.microsoft.sql, "SELECT item_no, SUM(instock_inventory) AS total_inventory FROM PROCUREMENTDB.Retail.InventoryReportView GROUP BY item_no")
+inventory_report <- dbFetch(inventory_report_sql)
+```
+
+```{r keepa list generator}
+today_list <- read_xlsx("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Purchase Analysis/Offer Files/2021-05-19.xlsx", sheet = 1)
+
+today_list$ISBN<- as.character(today_list$ISBN)
+
+today_list <- as.data.frame(today_list)
+```
+
+```{r get publication date or publisher}
+library(odbc)
+library(DBI)
+
+con.microsoft.sql <- DBI::dbConnect(odbc::odbc(),
+                      Driver   = "SQL Server",
+                      Server   = "52.86.56.66",
+                      Database = "PROCUREMENTDB",
+                      UID      = "LisaLi",
+                      PWD      = "t4vUByNaANWqszXP",
+                      Port     =  1433)
+
+cost_analysis_sql <- dbSendQuery(con.microsoft.sql, "SELECT T.ISBN, T.PublicationDate, T.BookType FROM PROCUREMENTDB.dbo.GoldenList T GROUP BY T.ISBN, T.PublicationDate, T.BookType")
+
+match_list <- dbFetch(cost_analysis_sql)
+match_list$ISBN <- as.character(match_list$ISBN)
+
+today_list <- today_list %>% 
+  left_join(match_list, by = c("ISBN")) %>%
+  filter(PublicationDate >= year(Sys.Date()) - 6)
+```
+
+```{r create list}
+isbn_today <- as.data.frame(today_list$ISBN)
+colnames(isbn_today) <- c("ISBN")
+list_isbn_split <- isbn_today %>% 
+    mutate(i1 = rep(1:10000, length.out=n()), grp = paste0("List", cumsum(i1==1))) %>%
+    spread(grp, ISBN) %>%
+    select(-i1)
+
+write.xlsx(list("ISBN Split" = list_isbn_split), paste("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Purchase Analysis/Listing Files/list_isbn_split_us_", sep = "", today(), ".xlsx"))
+```
+
+```{r keepa data reading - Long files}
+## Long list code
+keepa_isbn_file <- list.files("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Purchase Analysis/Keepa Files/Long Research Files/2021-06-03", pattern="*.xlsx", full.names=TRUE)
+keepa_isbn <- lapply(keepa_isbn_file, read_xlsx, sheet = 1)
+for (i in 1:length(keepa_isbn)){keepa_isbn[[i]]<-cbind(keepa_isbn[[i]],keepa_isbn_file[i])}
+keepa_isbn_all <- do.call("rbind", keepa_isbn) 
+keepa_buy <- keepa_isbn_all
+```
+
+```{r keepa data reading - Short files}
+# Short list code 
+keepa_buy <- read_xlsx("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Purchase Analysis/Keepa Files/Short Research Files/Keepa_ASIN_Export.2021_04_20.616_products.xlsx")
+  
+```
+
+```{r keepa data cleaning}
+tbl_vars(keepa_buy)
+# Data checking and selection
+keepa_buy <- keepa_buy %>% 
+  select(`Product Codes: EAN`, ASIN, `Title`,`Buy Box: Current`, `Buy Box: 30 days avg.`,`Buy Box: Lowest`,`Used: 30 days avg.`,`Sales Rank: Current`,`Sales Rank: 30 days avg.`,`Sales Rank: 90 days avg.`,`Sales Rank: 180 days avg.`,`Sales Rank: Lowest`,`New Offer Count: Current`, `Used Offer Count: Current`, `Publication Date`,`Buy Box Seller`, `FBA Fees:`, `Sales Rank: Drops last 90 days`, `Buy Box: Is FBA`)
+
+# keepa_buy$publication_date <- as.Date(keepa_buy$publication_date)
+library(stringr)
+keepa_buy <- str_split_fixed(keepa_buy$`Product Codes: EAN`, ",", 4) %>% 
+  cbind(keepa_buy)
+
+tbl_vars(keepa_buy)
+
+colnames(keepa_buy) <- c("V1","V2","V3","V4","isbn", "asin","title", "buybox_current", "buybox_30day_avg", "buybox_lowest","used_30day_avg","sale_rank_current","sale_rank_30","sale_rank_90","sale_rank_180", "sale_rank_lowest", "new_offer_count","used_offer_count","publication_date", "buybox_seller", "fba_fees", "sale_rank_drop_90days", "buybox_isfba")
+
+keepa_buy <- keepa_buy %>% 
+  mutate(isbn_new =  ifelse(startsWith(V2, " 97"), V2, 
+                            ifelse(startsWith(V3, " 97"), V3, V1))) %>% 
+  select("isbn_new", "isbn", "asin", "title","buybox_current", "buybox_30day_avg", "buybox_lowest","used_30day_avg","sale_rank_current","sale_rank_30","sale_rank_90","sale_rank_180", "sale_rank_lowest","new_offer_count","used_offer_count","publication_date", "buybox_seller", "fba_fees", "sale_rank_drop_90days", "buybox_isfba") 
+
+keepa_buy$buybox_current <- as.numeric(gsub("[\\$,]", "",keepa_buy$buybox_current))
+keepa_buy$buybox_30day_avg <- as.numeric(gsub("[\\$,]", "",keepa_buy$buybox_30day_avg))
+
+keepa_buy$isbn_new <- trimws(keepa_buy$isbn_new)
+
+keepa_buy <- keepa_buy %>% 
+  arrange(buybox_30day_avg) %>% 
+  distinct(isbn_new,.keep_all = TRUE)
+
+keepa_buy[,c(5:15)]<- lapply(keepa_buy[,c(5:15)], as.numeric)
+keepa_buy[,c(5:15)][is.na(keepa_buy[,c(5:15)])] <- 0
+
+keepa_buy$isbn_new <- as.character(keepa_buy$isbn_new)
+
+write.xlsx(list("Simon" = keepa_buy),paste("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Purchase Analysis/Decision Files/Simon_", sep = "", today(), ".xlsx"))
+```
+
+```{r calculating the GM and sellable analysis}
+today_list$ISBN <- as.character(today_list$ISBN)
+today_list$LANDED_COST<- today_list$LandedCosts
+
+inventory_analysis <- keepa_buy %>% 
+  left_join(today_list, by = c("isbn_new"= "ISBN")) %>% 
+  filter(!is.na(`Analysis Tab`)) %>% 
+  mutate(breakeven = (LANDED_COST + fba_fees + 1.8)/0.85,
+         diff_bl = breakeven - buybox_lowest, 
+         gm = ifelse(buybox_current == 0, (buybox_30day_avg*0.85- fba_fees - LANDED_COST)/buybox_30day_avg, (buybox_current*0.85 - fba_fees- LANDED_COST)/buybox_current)) 
+
+write.xlsx(list("Potential Purchasing List" = inventory_analysis),paste("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Purchase Analysis/Decision Files/Purchase_List_TX_", sep = "", today(), ".xlsx"))
+```
+
+```{r apply filters for purchasing analysis - trade books - without Cost}
+# Trade book filters without cost
+keepa_buy_fitler <- keepa_buy %>% 
+  filter(sale_rank_lowest <= 15000,
+         buybox_current >= 15,
+         new_offer_count/used_offer_count <= 40,
+         buybox_30day_avg/used_30day_avg <= 1.8,
+         sale_rank_current <= 30000,
+         sale_rank_current != 0)
+```
+
+```{r apply filters for purchasing analysis - textbooks - without Cost}
+# Trade book filters without cost
+keepa_buy_fitler <- keepa_buy %>% 
+  filter(sale_rank_lowest <= 20000,
+         buybox_current >= 25,
+         new_offer_count/used_offer_count <= 40,
+         buybox_30day_avg/used_30day_avg <= 2.2,
+         year(publication_date) >= 2014,
+         sale_rank_current != 0)
+
+write.xlsx(list("Potential Purchasing List" = keepa_buy_fitler),paste("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Purchase Analysis/Decision Files/Simon_TX_", sep = "", today(), ".xlsx"))
+```
+
+```{r apply filters for purchasing analysis - trade books - with Cost}
+today_list$ISBN <- as.character(today_list$ISBN)
+today_list$LANDED_COST <- today_list$`Best Landed`
+
+buy_isbns_tr_fba <- keepa_buy %>% 
+  left_join(today_list, by = c("isbn_new"= "ISBN")) %>% 
+  filter(sale_rank_lowest <= 15000,
+         buybox_current >= 15,
+         new_offer_count/used_offer_count <= 40,
+         buybox_30day_avg/used_30day_avg <= 1.8) %>%
+  mutate(breakeven = (LANDED_COST + fba_fees + 1.8)/0.85,
+         diff_bl = breakeven - buybox_lowest, 
+         gm = ifelse(buybox_current == 0, (buybox_30day_avg*0.85- fba_fees - LANDED_COST - 1.8)/buybox_30day_avg, (buybox_current*0.85 - fba_fees- LANDED_COST - 1.8)/buybox_current)) %>%
+  filter(gm >= 0.05,
+      ## sale_rank_current <= 50000,
+         sale_rank_current != 0)
+
+buy_isbns_tr_fbm <- keepa_buy %>% 
+  left_join(today_list, by = c("isbn_new"= "ISBN")) %>% 
+  filter(sale_rank_lowest <= 15000,
+         buybox_current >= 15,
+         new_offer_count/used_offer_count <= 40,
+         buybox_30day_avg/used_30day_avg <= 1.8) %>%
+  mutate(breakeven = (LANDED_COST + 2.8 + 1.8)/0.85,
+         diff_bl = breakeven - buybox_lowest, 
+         gm = ifelse(buybox_current == 0, (buybox_30day_avg*0.85- 2.8 - LANDED_COST - 1.8)/buybox_30day_avg, (buybox_current*0.85 - 2.8 - LANDED_COST - 1.8)/buybox_current)) %>% 
+  filter(diff_bl <= 5,
+         gm >= 0.05,
+         sale_rank_current != 0)
+
+buy_isbns_tr_fba$title <- gsub(": A Novel", "", buy_isbns_tr_fba$title)
+buy_isbns_tr_fba$title <- lapply(buy_isbns_tr_fba$title, toupper)
+
+write.xlsx(list("Potential Purchasing List FBA" = buy_isbns_tr_fba, "Potential Purchasing List FBM" = buy_isbns_tr_fbm),paste("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Purchase Analysis/Decision Files/Purchase_List_TR_", sep = "", today(), ".xlsx"))
+```
+
+```{r apply filters for purchasing analysis - textbooks}
+tbl_vars(today_list)
+today_list$LandedCost <- today_list$`Best Cost`
+today_list$ISBN <- as.character(today_list$ISBN)
+inventory_report$item_no<- as.character(inventory_report$item_no)
+
+buy_isbns_tx <- keepa_buy %>% 
+  left_join(today_list, by = c("isbn_new"= "ISBN")) %>% 
+  filter(sale_rank_lowest <= 30000,
+         buybox_current >= 25,
+         new_offer_count/used_offer_count <= 40,
+         buybox_30day_avg/used_30day_avg <= 2.2) %>% 
+  mutate(breakeven = (LandedCost + fba_fees + 1.8)/ 0.85,
+         diff_bl = breakeven - buybox_lowest, 
+         roi = ifelse(buybox_current == 0, (buybox_30day_avg*0.85- fba_fees - LandedCost - 1.8)/LandedCost, (buybox_current*0.85- fba_fees -LandedCost - 1.8)/LandedCost),
+         gm = ifelse(buybox_current == 0, (buybox_30day_avg*0.85- fba_fees - LandedCost - 1.8)/buybox_30day_avg, (buybox_current*0.85 - fba_fees- LandedCost - 1.8)/buybox_current)) %>% 
+  filter(# roi >= 0.18,
+         gm >= 0.08,
+         year(publication_date) >= 2012) %>% 
+  left_join(inventory_report, by = c("isbn_new" = "item_no")) %>% 
+  filter(sale_rank_current != 0) 
+
+buy_isbns_tx$total_inventory[is.na(buy_isbns_tx$total_inventory)] <- 0
+
+# For Jan Rush - check January Trend
+# 20k	20
+# 10k	50
+# 5k	100
+# 1k	200
+# 50-200	300
+write.xlsx(list("Potential Purchasing List" = buy_isbns_tx),paste("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Purchase Analysis/Decision Files/Purchase_List_TX_", sep = "", today(), ".xlsx"))
+```

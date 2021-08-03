@@ -1,0 +1,164 @@
+---
+title: "Sale Performance"
+author: "Lisa Li"
+date: "2/2/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+rm(list=ls())
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r library all the files}
+library(RPostgreSQL)
+library(dplyr)
+library(dbplyr)
+library(data.table)
+library(lubridate)
+library(reshape2)
+library(stringr)
+library("readxl")
+library(writexl)
+library(openxlsx)
+library(tidyverse)
+library(odbc)
+```
+
+```{r fifo & inventory & sku list information loading}
+con.microsoft.sql <- DBI::dbConnect(odbc::odbc(),
+                      Driver   = "SQL Server",
+                      Server   = "52.86.56.66",
+                      Database = "PROCUREMENTDB",
+                      UID      = "LisaLi",
+                      PWD      = "t4vUByNaANWqszXP",
+                      Port     =  1433)
+
+inventory_report_sql <- dbSendQuery(con.microsoft.sql, "SELECT I.item_no, I.whse_code, SUM(I.instock_inventory) AS instock_inventory FROM PROCUREMENTDB.Retail.InventoryReportView I GROUP BY I.item_no, I.whse_code")
+inventory_report <- dbFetch(inventory_report_sql)
+
+con.microsoft.sql <- DBI::dbConnect(odbc::odbc(),
+                      Driver   = "SQL Server",
+                      Server   = "52.86.56.66",
+                      Database = "PROCUREMENTDB",
+                      UID      = "LisaLi",
+                      PWD      = "t4vUByNaANWqszXP",
+                      Port     =  1433)
+
+keepa_data_sql <- dbSendQuery(con.microsoft.sql, "SELECT K.* FROM PROCUREMENTDB.Retail.KeepaCleanedRawView K")
+keepa_data <- dbFetch(keepa_data_sql)
+
+keepa_data <- keepa_data %>% 
+  arrange(Isbn_Keepa, BuyBox_Price) %>% 
+  distinct(Isbn_Keepa, .keep_all = TRUE)
+
+con.microsoft.sql <- DBI::dbConnect(odbc::odbc(),
+                      Driver   = "SQL Server",
+                      Server   = "52.86.56.66",
+                      Database = "PROCUREMENTDB",
+                      UID      = "LisaLi",
+                      PWD      = "t4vUByNaANWqszXP",
+                      Port     =  1433)
+
+sku_list_sql <- dbSendQuery(con.microsoft.sql, "SELECT * FROM Retail.SkuCategoryPriceView")
+sku_list<- dbFetch(sku_list_sql)
+
+con.microsoft.sql <- DBI::dbConnect(odbc::odbc(),
+                      Driver   = "SQL Server",
+                      Server   = "52.86.56.66",
+                      Database = "PROCUREMENTDB",
+                      UID      = "LisaLi",
+                      PWD      = "t4vUByNaANWqszXP",
+                      Port     =  1433)
+
+fifo_data_sql <- dbSendQuery(con.microsoft.sql, "SELECT MAX(F.FIFO) AS FIFO, F.ISBN AS item_no FROM PROCUREMENTDB.Retail.FIFO F GROUP BY F.ISBN")
+fifo_data <- dbFetch(fifo_data_sql)
+fifo_data <- fifo_data[,c(2,1)]
+```
+
+```{r business report cleaning}
+sku_orders_adhoc_all <- read.csv("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Raw Data/Amazon_Raw/SKU_AdHoc_Manual_Raw/BusinessReport-6-7-21.csv")
+tbl_vars(sku_orders_adhoc_all)
+
+# sku_list$isbn <- as.character(sku_list$isbn)
+sku_orders_adhoc_all$Ordered.Product.Sales = as.numeric(gsub("[//$,]", "", sku_orders_adhoc_all$Ordered.Product.Sales))
+sku_orders_adhoc_all$`Ordered.Product.Sales...B2B` = as.numeric(gsub("[//$,]", "", sku_orders_adhoc_all$`Ordered.Product.Sales...B2B`))
+sku_orders_adhoc_all$Buy.Box.Percentage = as.numeric(gsub("[//%,]", "", sku_orders_adhoc_all$Buy.Box.Percentage))
+sku_orders_adhoc_all$Buy.Box.Percentage = sku_orders_adhoc_all$Buy.Box.Percentage*0.01
+
+sku_orders_adhoc_all[,c(5,7,10,11,16,17)] <- lapply(sku_orders_adhoc_all[,c(5,7,10,11,16,17)], function(x) as.numeric(gsub("//,", "", as.character(x))))
+
+total_orders <- sum(sku_orders_adhoc_all$Units.Ordered)
+```
+
+```{r data sources cleaning}
+inventory_report_detail <- inventory_report %>% 
+  dcast(item_no ~ whse_code, value.var = "instock_inventory")
+
+inventory_report_detail[,c(2:9)][is.na(inventory_report_detail[,c(2:9)])] <- 0
+
+inventory_report_detail <- inventory_report_detail %>% 
+  mutate(Amazon_Instock = FBA_AW + FBA_TR,
+         Warehouse_Instock= AW + FBM + `TB-2` + TR,
+         Instock_Inventory = Amazon_Instock + Warehouse_Instock) %>% 
+  select(item_no, Instock_Inventory, Warehouse_Instock, Amazon_Instock)
+
+inventory_report_detail$item_no <- as.character(inventory_report_detail$item_no)
+
+tbl_vars(keepa_data)
+keepa_data <- keepa_data %>% 
+  select(Isbn_Keepa, Publisher, Title, BuyBox_Price, SaleRank_Current, Publication_Date, New_Amz_Offers, Used_Amz_Offers, FBA_Fees, Package_Weight)
+```
+
+```{r sale data information combine}
+tbl_vars(sku_orders_adhoc_all)
+sku_orders_adhoc_clean <- sku_orders_adhoc_all %>% 
+  group_by(SKU) %>% 
+  summarise(sessions = sum(Sessions),
+            page_view = sum(Page.Views),
+            total_orders = sum(Total.Order.Items) + sum(`Total.Order.Items...B2B`),
+            unit_orders = sum(Units.Ordered) + sum(`Units.Ordered...B2B`),
+            sales_usd = sum(Ordered.Product.Sales) + sum(`Ordered.Product.Sales...B2B`),
+            buy_box_percentage = mean(Buy.Box.Percentage)) %>% 
+  ungroup()
+
+sku_orders_adhoc_clean <- sku_orders_adhoc_clean %>% 
+  left_join(sku_list, by = c("SKU" = "Sku")) %>% 
+  select(SKU, Isbn, sessions, page_view, total_orders, unit_orders, sales_usd, buy_box_percentage) %>% 
+  filter(!is.na(Isbn))
+
+colnames(sku_orders_adhoc_clean) <- c("Sku","Isbn","Amz_Sessions","Amz_Pageviews","Amz_Orders","Amz_Units","Amz_Sales_USD", "Amz_Buy_Box_Percentage")
+
+sku_orders_adhoc_clean$Isbn<- as.character(sku_orders_adhoc_clean$Isbn)
+
+sku_list_isbn <- sku_list %>% 
+  arrange(Isbn, Category) %>% 
+  distinct(Isbn, .keep_all = TRUE)
+
+sku_orders_adhoc_price <- sku_orders_adhoc_clean %>% 
+  full_join(inventory_report_detail, by = c("Isbn" = "item_no")) %>% 
+  left_join(fifo_data, by = c("Isbn" = "item_no")) %>% 
+  left_join(keepa_data, by = c("Isbn" = "Isbn_Keepa")) %>% 
+  left_join(sku_list_isbn, by = c("Isbn")) 
+```
+
+```{r final data cleaning and data writing}
+tbl_vars(sku_orders_adhoc_price)
+
+sku_orders_adhoc_price <- sku_orders_adhoc_price %>% 
+  select(Isbn, Title, Category, Publisher, Publication_Date, SaleRank_Current, Amz_Sessions, Amz_Pageviews, Amz_Orders, Amz_Units, Amz_Sales_USD, Amz_Buy_Box_Percentage, Instock_Inventory, Warehouse_Instock, Amazon_Instock, Price, FIFO, BuyBox_Price, New_Amz_Offers, Used_Amz_Offers, FBA_Fees, Package_Weight)
+
+sku_orders_adhoc_price[,c(7:22)][is.na(sku_orders_adhoc_price[,c(7:22)])] <- 0
+
+sku_orders_adhoc_price <- sku_orders_adhoc_price %>% 
+  mutate(Total_Cost = FIFO*Amz_Units,
+         Gross_Margin = (Amz_Sales_USD*0.85 - Total_Cost - Amz_Units*FBA_Fees)/Amz_Sales_USD,
+         Velocity = Amz_Units/10,
+         Excess_Qty_Flag = ifelse(Instock_Inventory - Velocity*60 <= Instock_Inventory*0.15, "YES", "NO"))
+##       Channel = ifelse(str_detect(Sku, "TB") | str_detect(Sku, "AW") | str_detect(Sku, "MFN") | str_detect(Sku, "FBM"), "FBM", "FBA"))
+
+sku_orders_adhoc_price[,c(1:5)][is.na(sku_orders_adhoc_price[,c(1:5)])] <- ""
+
+write.xlsx(sku_orders_adhoc_price, sheetName = "1 month Sale Performance","C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Performance Analysis/Performance_2021-06-07.xlsx")
+```
+

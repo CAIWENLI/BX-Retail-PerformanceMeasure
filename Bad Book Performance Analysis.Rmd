@@ -1,0 +1,91 @@
+---
+title: "Bad Performance Analysis"
+author: "Lisa Li"
+date: "3/10/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+rm(list=ls())
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r library all the files}
+library(RPostgreSQL)
+library(dplyr)
+library(dbplyr)
+library(data.table)
+library(lubridate)
+library(reshape2)
+library(stringr)
+library("readxl")
+library(writexl)
+library(openxlsx)
+library(tidyverse)
+library(odbc)
+```
+
+```{r fifo & inventory & sku list information loading}
+con.microsoft.sql <- DBI::dbConnect(odbc::odbc(),
+                      Driver   = "SQL Server",
+                      Server   = "52.86.56.66",
+                      Database = "PROCUREMENTDB",
+                      UID      = "LisaLi",
+                      PWD      = "t4vUByNaANWqszXP",
+                      Port     =  1433)
+
+inventory_report_sql <- dbSendQuery(con.microsoft.sql, "SELECT I.item_no, I.whse_code, SUM(I.instock_inventory) AS instock_inventory FROM PROCUREMENTDB.Retail.InventoryReportView I GROUP BY I.item_no, I.whse_code")
+inventory_report <- dbFetch(inventory_report_sql)
+
+inventory_report_no_whse <- inventory_report %>% 
+  group_by(item_no) %>% 
+  summarise(instock_inventory = sum(instock_inventory))
+sku_list_sql <- dbSendQuery(con.microsoft.sql, "SELECT * FROM Retail.SkuCategoryPriceView")
+sku_list<- dbFetch(sku_list_sql)
+
+fifo_data_sql <- dbSendQuery(con.microsoft.sql, "SELECT MAX(F.FIFO) AS FIFO, F.ISBN AS item_no FROM PROCUREMENTDB.Retail.FIFO F GROUP BY F.ISBN")
+fifo_data <- dbFetch(fifo_data_sql)
+fifo_data <- fifo_data[,c(2,1)]
+
+keepa_data_sql <- dbSendQuery(con.microsoft.sql, "SELECT * FROM PROCUREMENTDB.Retail.KeepaCleanedRawView")
+keepa_data <- dbFetch(keepa_data_sql)
+keepa_data <- keepa_data  %>% 
+  arrange(BuyBox_Price) %>% 
+  distinct(Isbn_Keepa,.keep_all = TRUE)
+
+inv_aging_data_sql <- dbSendQuery(con.microsoft.sql, "SELECT * FROM BookXCenterProduction.Data.FBAInventoryAges")
+inventory_age_report <- dbFetch(inv_aging_data_sql)
+
+inventory_age_report <- read.csv("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Raw Data/Analysis_Raw/1145408018696.csv")
+```
+
+```{r combine tables}
+inventory_age_report_f <- inventory_age_report %>% 
+  left_join(sku_list, by = c("Sku" = "Sku")) %>% 
+  left_join(fifo_data, by = c("Isbn" = "item_no")) %>% 
+  left_join(keepa_data, by = c("Isbn" = "Isbn_Keepa")) %>% 
+  left_join(inventory_report_no_whse, by = c("Isbn" = "item_no"))
+
+inventory_age_report_f$instock_inventory[is.na(inventory_age_report_f$instock_inventory)] <- 0 
+
+tbl_vars(inventory_age_report_f)
+inventory_age_report_f <- inventory_age_report_f %>% 
+  mutate(total.inventory = ifelse(instock_inventory >= AvaliableQuantitySellable, instock_inventory, AvaliableQuantitySellable))
+
+performance_report <- inventory_age_report_f %>% 
+  select(Sku, Isbn, ProductName, Condition, Category, Publication_Date, RecommendedAction, AvaliableQuantitySellable, total.inventory, InvAge0To90Days, InvAge91To180Days, InvAge181To270Days, InvAge271To365Days, InvAge365PlusDays, UnitsShippedLast7Days, UnitsShippedLast30Days, UnitsShippedLast60Days, UnitsShippedLast90Days, LowestPriceNew, LowestPriceUsed, Price, FIFO, BuyBox_Price, SaleRank_Current, FBA_Fees)
+
+colnames(performance_report) <- c("sku", "isbn", "product.name", "condition", "category", "pub.date", "recommended.action", "sellable.qty", "total.inventory", "inv.age.0.to.90.days", "inv.age.91.to.180.days", "inv.age.181.to.270.days", "inv.age.271.to.365.days", "inv.age.365.plus.days", "units.shipped.last.7.days", "units.shipped.last.30.days", "units.shipped.last.60.days", "units.shipped.last.90.days","lowest.price.new", "lowest.price.used", "amz.list.price", "fifo.price", "buybox.price", "salerank.price", "fba.fees")
+
+performance_report[,c(8:25)][is.na(performance_report[,c(8:25)])] <- 0
+
+performance_report <-  performance_report %>% 
+  mutate(fifo.price = ifelse(fifo.price == 0, (amz.list.price*0.85 - fba.fees)/1.25, fifo.price),
+         fifo.price = ifelse(fifo.price <= 4, 4, fifo.price),
+         velocity = units.shipped.last.30.days/30,
+         aging.book = ifelse(inv.age.181.to.270.days + inv.age.271.to.365.days + inv.age.365.plus.days > 0 & inv.age.0.to.90.days + inv.age.91.to.180.days == 0, "Aging.Book", "New.Book"), 
+         gross.margin = (units.shipped.last.90.days*amz.list.price - units.shipped.last.90.days*fifo.price - units.shipped.last.90.days*fba.fees)/(units.shipped.last.90.days*amz.list.price))
+
+write.xlsx(list("Bad Performance Books" = performance_report),paste("C:/Users/lisal/Desktop/Bad_Performance_Books_", sep = "", today(), ".xlsx"))
+```
+
