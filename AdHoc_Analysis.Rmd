@@ -1,0 +1,157 @@
+---
+title: "Ad Hoc Analysis Auto"
+author: "Lisa Li"
+date: "11/20/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+rm(list=ls())
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r library all the files}
+library(RPostgreSQL)
+library(dplyr)
+library(dbplyr)
+library(data.table)
+library(lubridate)
+library(reshape2)
+library(stringr)
+library("readxl")
+library(writexl)
+library(openxlsx)
+library(geosphere)
+library(zipcodeR)
+```
+
+```{r payment report for calculating GM 2020-11-16}
+sale_history_file <- list.files("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Raw Data/SAP_Raw/Sale History Report", pattern="*.xlsx", full.names=TRUE)
+sale_history <- lapply(sale_history_file, read.xlsx)
+sale_history_all <- do.call("rbind", sale_history) 
+
+payment_report_file <- list.files("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Raw Data/Amazon_Raw/Payment_Report_Raw", pattern="*.csv", full.names=TRUE)
+payment_report <- lapply(payment_report_file, read.csv, header=T, sep=",")
+payment_report_all <- do.call("rbind", payment_report) 
+
+summary(sale_history_all)
+
+sale_history_all$BP.Reference.No. <- as.character(sale_history_all$BP.Reference.No.)
+payment_report_all$order.id <- as.character(payment_report_all$order.id)
+  
+```
+
+```{r order level comparing}
+sale_history_all_clean <- sale_history_all %>% 
+  group_by(BP.Reference.No., ItemCode) %>% 
+  summarise(Posting.Date = min(Posting.Date),
+            Quantity = sum(Quantity),
+            Price = sum(Price),
+            LineTotal = sum(LineTotal),
+            Total.Cost = sum(Total.Cost),
+            Gross.Profit = sum(Gross.Profit))
+
+summary(payment_report_all)
+tbl_vars(payment_report_all)
+payment_report_all[,c(7, 15:28)] <- sapply(payment_report_all[,c(7, 15:28)], as.numeric)
+payment_report_all[,c(7, 15:28)][is.na(payment_report_all[,c(7, 15:28)])] <- 0
+payment_report_all <- str_split_fixed(payment_report_all$`ï..date.time`, " ", 4) %>% 
+  cbind(payment_report_all)
+payment_report_all$date <- as.Date(paste(payment_report_all$`1`, payment_report_all$`2`, payment_report_all$`3`),format='%B %d, %Y')
+
+payment_report_all_clean <- payment_report_all %>% 
+  group_by(order.id, sku, description, fulfillment, order.state, order.postal) %>% 
+  summarise(date = min(date),
+            quantity = mean(quantity),
+            product.sales = sum(product.sales),
+            product.sales.tax = sum(product.sales.tax),
+            selling.fees = sum(selling.fees),
+            fba.fees = sum(fba.fees),
+            other.transaction.fees = sum(other.transaction.fees),
+            total = sum(total))
+
+orders_all <- sale_history_all_clean %>% 
+  inner_join(payment_report_all_clean, by = c("BP.Reference.No." = "order.id")) %>% 
+  filter(!sku == "" & !fulfillment == "")
+
+fees_all <- payment_report_all %>% 
+  filter(sku == "" | fulfillment == "") %>% 
+  group_by(order.id, type, description, date) %>% 
+  summarise(fees = sum(total)) %>% 
+  filter(fees != 0) 
+
+
+colnames(orders_all) <- c("Amz.Order.Num", "ISBN", "SAP.Posting.Date",  "SAP.Sale.Qty", "SAP.Sale.Price", "SAP.Line.Total", "SAP.Total.Cost", "SAP.Gross.ProfitNoFees", "Sku", "Item.Desc", "Amz.Fulfillment.Channel", "Cust.State", "Cust.Zip",  "Amz.Order.Date", "Amz.Sale.Qty", "Amz.Prod.Sale", "Amz.Sale.Tax", "Amz.Selling.Fees", "Amz.Fba.Fees", "Amz.Other.Tran.Fees", "Amz.Net.TotalNoCost")
+
+write.csv(orders_all, "C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Ad Hoc/Doriah/Sale Analysis/Order & Fees QA/Order_All_SAP_Amz_Final.csv", row.names = FALSE)
+write.csv(fees_all, "C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Ad Hoc/Doriah/Sale Analysis/Order & Fees QA/Fees_All_Amz_Final.csv", row.names = FALSE)
+```
+
+```{r QA section}
+## Checking the history & difference - SAP does not track refund 
+orders_all_org <- sale_history_all %>% 
+  inner_join(payment_report, by = c("BP.Reference.No." = "order.id")) 
+
+## Method One: Join by order level only, remove refund or adjust
+payment_report_order <- payment_report %>% 
+  filter(type %in% "Order")
+
+orders_all <- sale_history_all %>% 
+  inner_join(payment_report_order, by = c("BP.Reference.No." = "order.id")) %>% 
+  arrange(desc(date)) %>% 
+  distinct(BP.Reference.No.,.keep_all = TRUE) %>% 
+  select(BP.Reference.No., Posting.Date, ItemCode, description, Quantity, Price, LineTotal, Total.Cost, Gross.Profit, sku, quantity, fulfillment, order.state, order.postal, product.sales, product.sales.tax,selling.fees, fba.fees, other.transaction.fees, total, date, year, month)
+
+
+orders_all <- sale_history_all %>% 
+  inner_join(payment_report, by = c("BP.Reference.No." = "order.id")) %>% 
+  group_by(BP.Reference.No.,sku, Posting.Date, ItemCode, description,  fulfillment, order.state, order.postal, date, year, month) %>% 
+  summarise(Quantity = mean(Quantity),
+            Price = mean(Price),
+            LineTotal = mean(LineTotal),
+            Total.Cost = mean(Total.Cost),
+            Gross.Profit = mean(Gross.Profit),
+            quantity = mean(quantity),
+            product.sales = mean(product.sales),
+            product.sales.tax = mean(product.sales.tax),
+            selling.fees = mean(selling.fees),
+            fba.fees = mean(fba.fees),
+            other.transaction.fees = mean(other.transaction.fees),
+            total = mean(total))
+
+
+write.csv(orders_all, "C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Ad Hoc/Order_All_SAP_Amz_V3.csv", row.names = FALSE)
+```
+
+```{r ad hoc publisher 2020-11-19}
+march_june_file <- list.files("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Ad Hoc/ISBN Analysis Rush", pattern="*.csv", full.names=TRUE)
+march_june <- lapply(march_june_file, read.csv, header = T, sep = ",")
+for (i in 1:length(march_june)){march_june[[i]]<-cbind(march_june[[i]],march_june_file[i])}
+march_june_all <- do.call("rbind", march_june) 
+
+march_june_all$`march_june_file[i]` <- gsub("^.*_","", march_june_all$`march_june_file[i]`)
+march_june_all$`march_june_file[i]` <- gsub(".csv","", march_june_all$`march_june_file[i]`)
+
+march_june_all$Ordered.Product.Sales = as.numeric(gsub("[//$,]", "", march_june_all$Ordered.Product.Sales))
+march_june_all$Buy.Box.Percentage = as.numeric(gsub("[//%,]", "", march_june_all$Buy.Box.Percentage))
+march_june_all$Buy.Box.Percentage = march_june_all$Buy.Box.Percentage*0.01
+
+march_june_all[,c(5,7,10,13)] <- lapply(march_june_all[,c(5,7,10,13)], function(x) as.numeric(gsub("//,", "", as.character(x))))
+
+march_june_all <- march_june_all %>% 
+  select(SKU, Title, Ordered.Product.Sales, `march_june_file[i]`) %>% 
+  left_join(sku_list, by = c("SKU" = "sku"))
+
+colnames(march_june_all) <- c("sku", "title", "sale_usd", "year", "isbn", "category")
+
+write.csv(march_june_all, "C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Ad Hoc/ISBN Analysis Rush/march_june_all.csv", row.names = FALSE)
+
+pub_data <- read.csv("C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Raw Data/Keepa_Raw/Temp ISBNs/temp.csv")
+
+march_june_all$isbn <- as.character(march_june_all$isbn)
+pub_data$isbn_new <- as.character(pub_data$isbn_new)
+pub_analysis <- march_june_all %>% 
+  left_join(pub_data, by = c("isbn" = "isbn_new"))
+
+write.csv(pub_analysis, "C:/Users/lisal/OneDrive - bookxchange.com/Retail Reporting/Ad Hoc/ISBN Analysis Rush/pub_analysis.csv", row.names = FALSE)
+```
